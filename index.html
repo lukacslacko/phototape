@@ -1,0 +1,775 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Phototape — photo → printable tape</title>
+<style>
+  :root {
+    --bg: #1a1a1c;
+    --panel: #232327;
+    --ink: #e8e8ea;
+    --mute: #9898a0;
+    --accent: #6ea8ff;
+    --border: #333338;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 20px;
+    background: var(--bg);
+    color: var(--ink);
+    font: 14px/1.4 system-ui, -apple-system, sans-serif;
+  }
+  h1 { margin: 0 0 4px; font-size: 20px; font-weight: 600; }
+  p.lead { margin: 0 0 20px; color: var(--mute); }
+  .layout { display: grid; grid-template-columns: minmax(320px, 1fr) minmax(320px, 1fr); gap: 20px; }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+  }
+  .panel h2 { margin: 0 0 12px; font-size: 14px; font-weight: 600; color: var(--mute); text-transform: uppercase; letter-spacing: 0.05em; }
+  .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+  label { color: var(--mute); font-size: 13px; }
+  input[type=file] { color: var(--ink); }
+  input[type=number], select {
+    background: #1a1a1c; color: var(--ink); border: 1px solid var(--border);
+    border-radius: 4px; padding: 6px 8px; font: inherit;
+  }
+  input[type=range] { width: 160px; }
+  button {
+    background: var(--accent); color: #0c1220; border: 0;
+    border-radius: 4px; padding: 8px 14px; font: inherit; font-weight: 600;
+    cursor: pointer;
+  }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  button.secondary { background: #3a3a42; color: var(--ink); }
+  .canvas-wrap { display: inline-block; max-width: 100%; }
+  #sourceCanvas { display: block; max-width: 100%; height: auto; background: #000; border-radius: 4px; cursor: crosshair; }
+  .hint { color: var(--mute); font-size: 12px; margin-top: 6px; }
+  .palette-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(70px, 1fr));
+    gap: 6px;
+    margin-top: 10px;
+  }
+  .swatch {
+    border-radius: 4px; overflow: hidden; border: 1px solid var(--border);
+    background: var(--bg); cursor: pointer; user-select: none;
+  }
+  .swatch .chip { height: 36px; }
+  .swatch .meta { padding: 4px 6px; font-size: 11px; color: var(--mute); display: flex; justify-content: space-between; }
+  .swatch.excluded .chip { opacity: 0.25; }
+  .swatch.excluded .meta { text-decoration: line-through; }
+  .swatch.dropped { outline: 2px solid #e06060; outline-offset: -2px; }
+  .swatch.dropped .chip { opacity: 0.25; }
+  .swatch.dropped .meta { color: #e06060; text-decoration: line-through; }
+  .tape-band { cursor: pointer; transition: opacity 0.15s; }
+  .tape-band:hover { opacity: 0.75; }
+  .tape-preview {
+    width: 100%; height: 60px; border-radius: 4px; overflow: hidden;
+    display: flex; border: 1px solid var(--border);
+  }
+  .tape-band { height: 100%; }
+  .quantized-wrap canvas { max-width: 100%; border-radius: 4px; }
+  .status { color: var(--mute); font-size: 12px; margin-top: 8px; min-height: 16px; }
+
+  /* Print sheet — visible on screen too so user can review */
+  .print-sheet {
+    width: 297mm; height: 210mm;
+    background: white; color: black;
+    padding: 8mm;
+    margin: 20px auto 0;
+    box-shadow: 0 4px 30px rgba(0,0,0,0.4);
+    display: flex; flex-direction: column; gap: 6mm;
+    overflow: hidden;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  .print-sheet * {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  .print-row { display: flex; gap: 2mm; align-items: stretch; }
+  .print-row .photo { flex: 0 0 auto; }
+  .print-row .photo canvas { display: block; height: 100%; }
+  .print-row .tape { flex: 1 1 auto; display: flex; flex-direction: column; overflow: hidden; }
+  .print-row .tape .b { width: 100%; }
+  .print-sheet .label { font: 9pt sans-serif; color: #333; margin-right: 2mm; align-self: center; min-width: 18mm; }
+
+  @media print {
+    @page { size: A4 landscape; margin: 0; }
+    body { background: white; padding: 0; }
+    body > :not(.print-sheet) { display: none !important; }
+    .print-sheet { box-shadow: none; margin: 0; page-break-after: always; }
+  }
+</style>
+</head>
+<body>
+  <h1>Phototape</h1>
+  <p class="lead">Turn a photo into printable journaling tape. Upload → select area → pick palette → print on A4 adhesive paper.</p>
+
+  <div class="layout">
+    <section class="panel">
+      <h2>1. Source</h2>
+      <div class="row">
+        <input type="file" id="fileInput" accept="image/*">
+      </div>
+      <div class="canvas-wrap" id="sourceWrap" style="display:none">
+        <canvas id="sourceCanvas"></canvas>
+      </div>
+      <div class="hint">Drag on the image to select a region. Click without dragging to select the whole image.</div>
+    </section>
+
+    <section class="panel">
+      <h2>2. Palette</h2>
+      <div class="row">
+        <label>Colors: <span id="kVal">12</span></label>
+        <input type="range" id="kInput" min="2" max="24" value="12">
+      </div>
+      <div class="row">
+        <label>Method:</label>
+        <select id="methodInput">
+          <option value="lab">k-means in CIELAB (perceptual)</option>
+          <option value="lab-median">Median cut in CIELAB</option>
+          <option value="rgb">k-means in RGB</option>
+          <option value="median">Median cut in RGB</option>
+        </select>
+      </div>
+      <div class="row">
+        <button id="analyzeBtn" disabled>Analyze</button>
+        <button id="printBtn" class="secondary" disabled>Print A4</button>
+      </div>
+      <div class="status" id="status"></div>
+    </section>
+
+    <section class="panel">
+      <h2>3. Quantized preview</h2>
+      <div class="quantized-wrap">
+        <canvas id="quantCanvas"></canvas>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>4. Tape</h2>
+      <div class="row">
+        <label>Thickening: <span id="thickVal">0</span>%</label>
+        <input type="range" id="thickInput" min="0" max="100" value="0">
+        <span class="hint" style="margin:0">0 = proportional to pixel counts · 100 = uniform bands</span>
+      </div>
+      <div class="tape-preview" id="tapePreview"></div>
+      <div class="hint">Click a <b>tape band</b> to drop that color (its pixels are discarded, remaining bands resize). Click a <b>swatch</b> to redistribute it (its pixels go to the nearest remaining color). Click again to restore.</div>
+      <div class="palette-grid" id="paletteGrid"></div>
+    </section>
+  </div>
+
+  <div id="printSheet" class="print-sheet" style="display:none">
+    <!-- built dynamically -->
+  </div>
+
+<script>
+//=========================================================
+// Color conversions (sRGB <-> linear <-> XYZ <-> CIELAB)
+//=========================================================
+function srgbToLinear(c) {
+  c /= 255;
+  return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+}
+function linearToSrgb(c) {
+  const v = c <= 0.0031308 ? 12.92 * c : 1.055 * Math.pow(c, 1 / 2.4) - 0.055;
+  return Math.max(0, Math.min(255, Math.round(v * 255)));
+}
+function rgbToLab(r, g, b) {
+  const lr = srgbToLinear(r), lg = srgbToLinear(g), lb = srgbToLinear(b);
+  const x = lr * 0.4124564 + lg * 0.3575761 + lb * 0.1804375;
+  const y = lr * 0.2126729 + lg * 0.7151522 + lb * 0.0721750;
+  const z = lr * 0.0193339 + lg * 0.1191920 + lb * 0.9503041;
+  const xn = 0.95047, yn = 1.0, zn = 1.08883;
+  const f = t => t > 0.008856451679 ? Math.cbrt(t) : 7.787037 * t + 16/116;
+  const fx = f(x/xn), fy = f(y/yn), fz = f(z/zn);
+  return [116*fy - 16, 500*(fx-fy), 200*(fy-fz)];
+}
+function labToRgb(L, a, b) {
+  const fy = (L + 16) / 116;
+  const fx = fy + a/500;
+  const fz = fy - b/200;
+  const finv = t => {
+    const t3 = t*t*t;
+    return t3 > 0.008856451679 ? t3 : (t - 16/116) / 7.787037;
+  };
+  const x = 0.95047 * finv(fx);
+  const y = 1.0     * finv(fy);
+  const z = 1.08883 * finv(fz);
+  const lr =  3.2404542*x - 1.5371385*y - 0.4985314*z;
+  const lg = -0.9692660*x + 1.8760108*y + 0.0415560*z;
+  const lb =  0.0556434*x - 0.2040259*y + 1.0572252*z;
+  return [linearToSrgb(lr), linearToSrgb(lg), linearToSrgb(lb)];
+}
+
+//=========================================================
+// Quantization methods
+//=========================================================
+// Each returns { palette: [[r,g,b],...], assign: Uint8Array of cluster index per input pixel,
+//                ys: Float32Array of y-coord per pixel } — we keep ys aligned with input.
+
+function sampleSelection(imgData, selRect) {
+  // Gather pixel Lab + RGB + y within selection.
+  const { data, width } = imgData;
+  const { x0, y0, x1, y1 } = selRect;
+  const rgb = [];
+  const lab = [];
+  const ys = [];
+  for (let y = y0; y < y1; y++) {
+    for (let x = x0; x < x1; x++) {
+      const i = (y * width + x) * 4;
+      const r = data[i], g = data[i+1], b = data[i+2], a = data[i+3];
+      if (a < 128) continue;
+      rgb.push([r, g, b]);
+      lab.push(rgbToLab(r, g, b));
+      ys.push(y);
+    }
+  }
+  return { rgb, lab, ys: Float32Array.from(ys) };
+}
+
+function dist2(a, b) {
+  const d0 = a[0]-b[0], d1 = a[1]-b[1], d2 = a[2]-b[2];
+  return d0*d0 + d1*d1 + d2*d2;
+}
+
+function kmeansPP(points, k) {
+  const n = points.length;
+  if (n === 0) return [];
+  const centers = [points[Math.floor(Math.random() * n)].slice()];
+  const d2 = new Float64Array(n);
+  for (let i = 0; i < n; i++) d2[i] = dist2(points[i], centers[0]);
+  while (centers.length < k) {
+    let total = 0;
+    for (let i = 0; i < n; i++) total += d2[i];
+    if (total === 0) break;
+    let r = Math.random() * total, idx = 0;
+    for (; idx < n-1; idx++) { r -= d2[idx]; if (r <= 0) break; }
+    centers.push(points[idx].slice());
+    const last = centers[centers.length - 1];
+    for (let i = 0; i < n; i++) {
+      const d = dist2(points[i], last);
+      if (d < d2[i]) d2[i] = d;
+    }
+  }
+  return centers;
+}
+
+function kmeans(points, k, maxIter = 25) {
+  const n = points.length;
+  if (n === 0) return { centers: [], assign: new Uint8Array(0) };
+  k = Math.min(k, n);
+  const centers = kmeansPP(points, k);
+  const assign = new Uint8Array(n);
+
+  for (let iter = 0; iter < maxIter; iter++) {
+    let changed = 0;
+    for (let i = 0; i < n; i++) {
+      const p = points[i];
+      let best = 0, bd = Infinity;
+      for (let j = 0; j < centers.length; j++) {
+        const d = dist2(p, centers[j]);
+        if (d < bd) { bd = d; best = j; }
+      }
+      if (assign[i] !== best) { assign[i] = best; changed++; }
+    }
+    if (changed === 0) break;
+    const sums = centers.map(() => [0, 0, 0, 0]);
+    for (let i = 0; i < n; i++) {
+      const p = points[i], s = sums[assign[i]];
+      s[0]+=p[0]; s[1]+=p[1]; s[2]+=p[2]; s[3]++;
+    }
+    for (let j = 0; j < centers.length; j++) {
+      if (sums[j][3] > 0) {
+        centers[j] = [sums[j][0]/sums[j][3], sums[j][1]/sums[j][3], sums[j][2]/sums[j][3]];
+      }
+    }
+  }
+  return { centers, assign };
+}
+
+// Median cut — generic over any 3D point set (works for RGB or Lab).
+function medianCut(points, k) {
+  const boxes = [points.map((_, i) => i)];
+  const boxInfo = box => {
+    let min0=Infinity,max0=-Infinity,min1=Infinity,max1=-Infinity,min2=Infinity,max2=-Infinity;
+    for (const idx of box) {
+      const p = points[idx];
+      if (p[0]<min0) min0=p[0]; if (p[0]>max0) max0=p[0];
+      if (p[1]<min1) min1=p[1]; if (p[1]>max1) max1=p[1];
+      if (p[2]<min2) min2=p[2]; if (p[2]>max2) max2=p[2];
+    }
+    const ranges = [max0-min0, max1-min1, max2-min2];
+    const ch = ranges.indexOf(Math.max(...ranges));
+    return { ch, range: ranges[ch] };
+  };
+  while (boxes.length < k) {
+    let pick = -1, bestRange = -1;
+    for (let i = 0; i < boxes.length; i++) {
+      if (boxes[i].length < 2) continue;
+      const info = boxInfo(boxes[i]);
+      if (info.range > bestRange) { bestRange = info.range; pick = i; }
+    }
+    if (pick === -1) break;
+    const box = boxes[pick];
+    const { ch } = boxInfo(box);
+    box.sort((a, b) => points[a][ch] - points[b][ch]);
+    const mid = box.length >> 1;
+    boxes.splice(pick, 1, box.slice(0, mid), box.slice(mid));
+  }
+  const assign = new Uint8Array(points.length);
+  const centers = boxes.map((box, j) => {
+    let s0=0, s1=0, s2=0;
+    for (const idx of box) {
+      const p = points[idx];
+      s0 += p[0]; s1 += p[1]; s2 += p[2];
+      assign[idx] = j;
+    }
+    const n = box.length || 1;
+    return [s0/n, s1/n, s2/n];
+  });
+  return { centers, assign };
+}
+
+//=========================================================
+// App state
+//=========================================================
+const state = {
+  image: null,          // HTMLImageElement
+  imageData: null,      // full-res ImageData
+  selection: null,      // {x0,y0,x1,y1} in image pixel coords
+  palette: [],          // [{rgb:[r,g,b], count, meanY, excluded}]
+  assign: null,         // per sample cluster index
+  sampleYs: null,       // sample y coords
+  remap: null,          // after exclusion: cluster -> effective cluster
+  scale: 1,             // display scale factor
+};
+
+//=========================================================
+// UI: source canvas + selection
+//=========================================================
+const fileInput = document.getElementById('fileInput');
+const sourceCanvas = document.getElementById('sourceCanvas');
+const sourceWrap = document.getElementById('sourceWrap');
+const analyzeBtn = document.getElementById('analyzeBtn');
+const printBtn = document.getElementById('printBtn');
+const statusEl = document.getElementById('status');
+
+fileInput.addEventListener('change', async () => {
+  const file = fileInput.files[0];
+  if (!file) return;
+  const img = new Image();
+  img.onload = () => {
+    state.image = img;
+    const maxW = 600;
+    const scale = Math.min(1, maxW / img.width);
+    state.scale = scale;
+    const dw = Math.round(img.width * scale), dh = Math.round(img.height * scale);
+    sourceCanvas.width = dw; sourceCanvas.height = dh;
+    const full = document.createElement('canvas');
+    full.width = img.width; full.height = img.height;
+    full.getContext('2d').drawImage(img, 0, 0);
+    state.imageData = full.getContext('2d').getImageData(0, 0, img.width, img.height);
+    state.selection = { x0: 0, y0: 0, x1: img.width, y1: img.height };
+    sourceWrap.style.display = 'inline-block';
+    analyzeBtn.disabled = false;
+    drawSelection();
+    setStatus('Image loaded. Select a region or click Analyze.');
+  };
+  img.src = URL.createObjectURL(file);
+});
+
+// Convert mouse event coords to canvas buffer pixel coords. Accounts for any
+// CSS scaling (max-width shrinking, page zoom, device pixel ratio quirks).
+function mouseToBuffer(e) {
+  const r = sourceCanvas.getBoundingClientRect();
+  const sx = sourceCanvas.width / r.width;
+  const sy = sourceCanvas.height / r.height;
+  return {
+    x: Math.max(0, Math.min(sourceCanvas.width, (e.clientX - r.left) * sx)),
+    y: Math.max(0, Math.min(sourceCanvas.height, (e.clientY - r.top) * sy)),
+  };
+}
+
+let selStart = null;
+sourceCanvas.addEventListener('mousedown', e => {
+  e.preventDefault();
+  selStart = mouseToBuffer(e);
+});
+window.addEventListener('mousemove', e => {
+  if (!selStart) return;
+  const { x, y } = mouseToBuffer(e);
+  drawImageWithSelection({
+    x0: Math.min(selStart.x, x), y0: Math.min(selStart.y, y),
+    x1: Math.max(selStart.x, x), y1: Math.max(selStart.y, y),
+  });
+});
+window.addEventListener('mouseup', e => {
+  if (!selStart) return;
+  const { x, y } = mouseToBuffer(e);
+  const dx = Math.abs(x - selStart.x), dy = Math.abs(y - selStart.y);
+  if (dx < 4 && dy < 4) {
+    state.selection = { x0: 0, y0: 0, x1: state.image.width, y1: state.image.height };
+  } else {
+    const s = state.scale;
+    state.selection = {
+      x0: Math.round(Math.min(selStart.x, x) / s),
+      y0: Math.round(Math.min(selStart.y, y) / s),
+      x1: Math.round(Math.max(selStart.x, x) / s),
+      y1: Math.round(Math.max(selStart.y, y) / s),
+    };
+  }
+  selStart = null;
+  drawSelection();
+});
+
+// Draw the scaled image, then dim the area outside the selection and stroke it.
+function drawImageWithSelection(bufSel) {
+  const ctx = sourceCanvas.getContext('2d');
+  const W = sourceCanvas.width, H = sourceCanvas.height;
+  ctx.drawImage(state.image, 0, 0, W, H);
+  ctx.fillStyle = 'rgba(0,0,0,0.45)';
+  const { x0, y0, x1, y1 } = bufSel;
+  // Four rectangles around the selection.
+  ctx.fillRect(0, 0, W, y0);
+  ctx.fillRect(0, y1, W, H - y1);
+  ctx.fillRect(0, y0, x0, y1 - y0);
+  ctx.fillRect(x1, y0, W - x1, y1 - y0);
+  ctx.strokeStyle = '#6ea8ff';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(x0 + 1, y0 + 1, Math.max(0, x1 - x0 - 2), Math.max(0, y1 - y0 - 2));
+}
+function drawSelection() {
+  const s = state.scale, sel = state.selection;
+  drawImageWithSelection({
+    x0: sel.x0 * s, y0: sel.y0 * s,
+    x1: sel.x1 * s, y1: sel.y1 * s,
+  });
+}
+
+//=========================================================
+// Analyze
+//=========================================================
+document.getElementById('kInput').addEventListener('input', e => {
+  document.getElementById('kVal').textContent = e.target.value;
+});
+document.getElementById('thickInput').addEventListener('input', e => {
+  document.getElementById('thickVal').textContent = e.target.value;
+  if (state.palette.length) renderTape();
+});
+
+analyzeBtn.addEventListener('click', () => {
+  setStatus('Analyzing…');
+  // Defer so UI repaints
+  setTimeout(runAnalysis, 20);
+});
+
+function runAnalysis() {
+  const k = parseInt(document.getElementById('kInput').value, 10);
+  const method = document.getElementById('methodInput').value;
+  const { imageData, selection } = state;
+  if (!imageData || !selection) return;
+
+  // Sample with stride to cap work (~80k points)
+  const selW = selection.x1 - selection.x0;
+  const selH = selection.y1 - selection.y0;
+  const totalPx = selW * selH;
+  const target = 80000;
+  const stride = Math.max(1, Math.floor(Math.sqrt(totalPx / target)));
+
+  const rgb = [];
+  const lab = [];
+  const ys = [];
+  const { data, width } = imageData;
+  for (let y = selection.y0; y < selection.y1; y += stride) {
+    for (let x = selection.x0; x < selection.x1; x += stride) {
+      const i = (y * width + x) * 4;
+      const r = data[i], g = data[i+1], b = data[i+2], a = data[i+3];
+      if (a < 128) continue;
+      rgb.push([r, g, b]);
+      if (method === 'lab' || method === 'lab-median') lab.push(rgbToLab(r, g, b));
+      ys.push(y);
+    }
+  }
+
+  let centers, assign;
+  if (method === 'lab') {
+    ({ centers, assign } = kmeans(lab, k));
+    centers = centers.map(([L, a, b]) => labToRgb(L, a, b));
+  } else if (method === 'lab-median') {
+    ({ centers, assign } = medianCut(lab, k));
+    centers = centers.map(([L, a, b]) => labToRgb(L, a, b));
+  } else if (method === 'rgb') {
+    ({ centers, assign } = kmeans(rgb, k));
+    centers = centers.map(c => c.map(v => Math.max(0, Math.min(255, Math.round(v)))));
+  } else {
+    ({ centers, assign } = medianCut(rgb, k));
+    centers = centers.map(c => c.map(v => Math.max(0, Math.min(255, Math.round(v)))));
+  }
+
+  // Tally per cluster
+  const kActual = centers.length;
+  const counts = new Array(kActual).fill(0);
+  const ySums = new Array(kActual).fill(0);
+  for (let i = 0; i < assign.length; i++) {
+    const c = assign[i];
+    counts[c]++;
+    ySums[c] += ys[i];
+  }
+  const palette = centers.map((rgb, i) => ({
+    rgb, count: counts[i],
+    meanY: counts[i] > 0 ? ySums[i] / counts[i] : 0,
+    excluded: false,
+    dropped: false,
+    idx: i,
+  })).filter(p => p.count > 0);
+
+  state.palette = palette;
+  state.assign = assign;
+  state.sampleYs = ys;
+  state.sampleRGB = rgb; // used to recompute preview / remap on exclusion
+
+  renderPalette();
+  renderTape();
+  renderQuantized();
+  printBtn.disabled = false;
+  setStatus(`Found ${palette.length} colors from ${assign.length} samples (stride ${stride}).`);
+}
+
+function setStatus(s) { statusEl.textContent = s; }
+
+//=========================================================
+// Palette UI
+//=========================================================
+function renderPalette() {
+  const grid = document.getElementById('paletteGrid');
+  grid.innerHTML = '';
+  // Sort display by meanY
+  const sorted = [...state.palette].sort((a, b) => a.meanY - b.meanY);
+  for (const p of sorted) {
+    const div = document.createElement('div');
+    const cls = ['swatch'];
+    if (p.dropped) cls.push('dropped');
+    else if (p.excluded) cls.push('excluded');
+    div.className = cls.join(' ');
+    const [r,g,b] = p.rgb;
+    const hex = '#' + [r,g,b].map(v => v.toString(16).padStart(2, '0')).join('');
+    const tag = p.dropped ? ' dropped' : (p.excluded ? ' redist' : '');
+    div.innerHTML = `
+      <div class="chip" style="background:${hex}"></div>
+      <div class="meta"><span>${hex}${tag}</span><span>${p.count}</span></div>
+    `;
+    div.addEventListener('click', () => {
+      // Swatch click: restore if dropped/excluded, otherwise redistribute.
+      if (p.dropped || p.excluded) { p.dropped = false; p.excluded = false; }
+      else { p.excluded = true; }
+      refresh();
+    });
+    grid.appendChild(div);
+  }
+}
+
+function refresh() {
+  renderPalette();
+  renderTape();
+  renderQuantized();
+}
+
+//=========================================================
+// Tape rendering
+//=========================================================
+function activeForTape() {
+  return state.palette.filter(p => !p.excluded && !p.dropped);
+}
+
+// Build the tape layout. `excluded` colors are redistributed to the nearest
+// remaining color in Lab. `dropped` colors are discarded entirely.
+function tapeLayout() {
+  const active = activeForTape();
+  if (active.length === 0) return [];
+  const activeLab = active.map(p => rgbToLab(...p.rgb));
+
+  // Map: original cluster idx -> target active idx (or null if dropped)
+  const map = new Map();
+  for (const p of state.palette) {
+    if (p.dropped) { map.set(p.idx, null); continue; }
+    if (!p.excluded) { map.set(p.idx, p.idx); continue; }
+    const pLab = rgbToLab(...p.rgb);
+    let bestIdx = active[0].idx, bd = Infinity;
+    for (let j = 0; j < active.length; j++) {
+      const d = dist2(pLab, activeLab[j]);
+      if (d < bd) { bd = d; bestIdx = active[j].idx; }
+    }
+    map.set(p.idx, bestIdx);
+  }
+
+  const counts = new Map();
+  const ySums = new Map();
+  for (const p of active) { counts.set(p.idx, 0); ySums.set(p.idx, 0); }
+  for (let i = 0; i < state.assign.length; i++) {
+    const target = map.get(state.assign[i]);
+    if (target == null) continue;
+    counts.set(target, counts.get(target) + 1);
+    ySums.set(target, ySums.get(target) + state.sampleYs[i]);
+  }
+  const eff = active.map(p => ({
+    ...p,
+    effCount: counts.get(p.idx),
+    effMeanY: counts.get(p.idx) > 0 ? ySums.get(p.idx) / counts.get(p.idx) : p.meanY,
+  }));
+  eff.sort((a, b) => a.effMeanY - b.effMeanY);
+  const total = eff.reduce((s, p) => s + p.effCount, 0) || 1;
+  const n = eff.length;
+  const t = parseInt(document.getElementById('thickInput').value, 10) / 100;
+  return eff.map(p => ({
+    ...p,
+    frac: (1 - t) * (p.effCount / total) + t * (1 / n),
+  }));
+}
+
+function renderTape() {
+  const preview = document.getElementById('tapePreview');
+  preview.innerHTML = '';
+  const layout = tapeLayout();
+  for (const b of layout) {
+    const div = document.createElement('div');
+    div.className = 'tape-band';
+    div.style.flex = b.frac.toString();
+    div.style.background = `rgb(${b.rgb[0]},${b.rgb[1]},${b.rgb[2]})`;
+    div.title = 'Click to drop this color from the tape';
+    div.addEventListener('click', () => {
+      const entry = state.palette.find(p => p.idx === b.idx);
+      if (entry) { entry.dropped = true; refresh(); }
+    });
+    preview.appendChild(div);
+  }
+}
+
+//=========================================================
+// Quantized preview — recompute on each call to reflect exclusions.
+//=========================================================
+function renderQuantized() {
+  if (!state.imageData || !state.selection) return;
+  const sel = state.selection;
+  const selW = sel.x1 - sel.x0, selH = sel.y1 - sel.y0;
+  // Downscale for preview (max 500 wide)
+  const maxW = 500;
+  const s = Math.min(1, maxW / selW);
+  const pw = Math.max(1, Math.round(selW * s));
+  const ph = Math.max(1, Math.round(selH * s));
+  const canvas = document.getElementById('quantCanvas');
+  canvas.width = pw; canvas.height = ph;
+  const ctx = canvas.getContext('2d');
+
+  // First draw cropped source scaled, then read pixels and remap each to nearest active palette.
+  const srcCanvas = document.createElement('canvas');
+  srcCanvas.width = pw; srcCanvas.height = ph;
+  const srcCtx = srcCanvas.getContext('2d');
+  // Put the full image into srcCtx via tempo big canvas? Use createImageBitmap? Simplest:
+  const fullCanvas = document.createElement('canvas');
+  fullCanvas.width = state.imageData.width;
+  fullCanvas.height = state.imageData.height;
+  fullCanvas.getContext('2d').putImageData(state.imageData, 0, 0);
+  srcCtx.drawImage(fullCanvas, sel.x0, sel.y0, selW, selH, 0, 0, pw, ph);
+  const imgd = srcCtx.getImageData(0, 0, pw, ph);
+
+  const active = activeForTape();
+  if (active.length === 0) {
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, pw, ph);
+    return;
+  }
+  const activeLab = active.map(p => rgbToLab(...p.rgb));
+  const activeRGB = active.map(p => p.rgb);
+
+  const d = imgd.data;
+  for (let i = 0; i < d.length; i += 4) {
+    const lab = rgbToLab(d[i], d[i+1], d[i+2]);
+    let best = 0, bd = Infinity;
+    for (let j = 0; j < activeLab.length; j++) {
+      const dd = dist2(lab, activeLab[j]);
+      if (dd < bd) { bd = dd; best = j; }
+    }
+    d[i]   = activeRGB[best][0];
+    d[i+1] = activeRGB[best][1];
+    d[i+2] = activeRGB[best][2];
+  }
+  ctx.putImageData(imgd, 0, 0);
+}
+
+//=========================================================
+// Print sheet (A4 landscape)
+//=========================================================
+printBtn.addEventListener('click', () => {
+  buildPrintSheet();
+  // give browser a moment to layout before printing
+  setTimeout(() => window.print(), 50);
+});
+
+function buildPrintSheet() {
+  const sheet = document.getElementById('printSheet');
+  sheet.style.display = 'flex';
+  sheet.innerHTML = '';
+
+  const sizes = [8, 15, 30, 60]; // mm
+  const sel = state.selection;
+  const selW = sel.x1 - sel.x0, selH = sel.y1 - sel.y0;
+  const aspect = selW / selH; // width/height
+  const layout = tapeLayout();
+
+  // Pre-render a high-res crop canvas to reuse for each photo (scaled down)
+  const fullCanvas = document.createElement('canvas');
+  fullCanvas.width = state.imageData.width;
+  fullCanvas.height = state.imageData.height;
+  fullCanvas.getContext('2d').putImageData(state.imageData, 0, 0);
+
+  for (const mm of sizes) {
+    const row = document.createElement('div');
+    row.className = 'print-row';
+    row.style.height = mm + 'mm';
+
+    // Label on left
+    const labelEl = document.createElement('div');
+    labelEl.className = 'label';
+    labelEl.textContent = mm + ' mm';
+    row.appendChild(labelEl);
+
+    // Photo
+    const photoWrap = document.createElement('div');
+    photoWrap.className = 'photo';
+    const photoW_mm = mm * aspect;
+    photoWrap.style.width = photoW_mm + 'mm';
+    const pxPerMm = 11.81; // 300dpi
+    const pw = Math.max(8, Math.round(photoW_mm * pxPerMm));
+    const ph = Math.max(8, Math.round(mm * pxPerMm));
+    const c = document.createElement('canvas');
+    c.width = pw; c.height = ph;
+    c.style.width = photoW_mm + 'mm';
+    c.style.height = mm + 'mm';
+    c.getContext('2d').drawImage(fullCanvas, sel.x0, sel.y0, selW, selH, 0, 0, pw, ph);
+    photoWrap.appendChild(c);
+    row.appendChild(photoWrap);
+
+    // Tape
+    const tape = document.createElement('div');
+    tape.className = 'tape';
+    for (const band of layout) {
+      const b = document.createElement('div');
+      b.className = 'b';
+      b.style.flex = band.frac.toString();
+      b.style.background = `rgb(${band.rgb[0]},${band.rgb[1]},${band.rgb[2]})`;
+      tape.appendChild(b);
+    }
+    row.appendChild(tape);
+
+    sheet.appendChild(row);
+  }
+}
+</script>
+</body>
+</html>
