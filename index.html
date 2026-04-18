@@ -142,6 +142,11 @@
           <option value="rgb-meanshift">Mean shift in RGB</option>
         </select>
       </div>
+      <div class="row" id="bandwidthRow" style="display:none">
+        <label>Bandwidth: <span id="bwVal">100</span>%</label>
+        <input type="range" id="bwInput" min="25" max="400" step="5" value="100">
+        <span class="hint" style="margin:0">smaller = more, tighter modes · larger = fewer, broader</span>
+      </div>
       <div class="row">
         <button id="analyzeBtn" disabled>Analyze</button>
         <button id="printBtn" class="secondary" disabled>Print A4</button>
@@ -573,6 +578,27 @@ document.getElementById('thickInput').addEventListener('input', e => {
   if (state.palette.length) renderTape();
 });
 
+const methodInput = document.getElementById('methodInput');
+const bandwidthRow = document.getElementById('bandwidthRow');
+const bwInput = document.getElementById('bwInput');
+function isMeanShift() { return methodInput.value.endsWith('-meanshift'); }
+function syncBandwidthVisibility() {
+  bandwidthRow.style.display = isMeanShift() ? '' : 'none';
+}
+methodInput.addEventListener('change', syncBandwidthVisibility);
+syncBandwidthVisibility();
+
+bwInput.addEventListener('input', e => {
+  document.getElementById('bwVal').textContent = e.target.value;
+});
+// Re-run on release so we don't thrash during drag.
+bwInput.addEventListener('change', () => {
+  if (isMeanShift() && state.imageData) {
+    setStatus('Re-analyzing…');
+    setTimeout(runAnalysis, 20);
+  }
+});
+
 analyzeBtn.addEventListener('click', () => {
   setStatus('Analyzing…');
   // Defer so UI repaints
@@ -611,6 +637,7 @@ function runAnalysis() {
     }
   }
 
+  const bwMul = parseInt(document.getElementById('bwInput').value, 10) / 100;
   let centers, assign, numModes;
   if (method === 'oklab') {
     ({ centers, assign } = kmeans(oklab, k));
@@ -619,7 +646,7 @@ function runAnalysis() {
     ({ centers, assign } = medianCut(oklab, k));
     centers = centers.map(([L, A, B]) => oklabToRgb(L, A, B));
   } else if (method === 'oklab-meanshift') {
-    const bw = 0.08 * Math.cbrt(10 / k);
+    const bw = bwMul * 0.08 * Math.cbrt(10 / k);
     ({ centers, assign, numModes } = meanShift(oklab, k, bw));
     centers = centers.map(([L, A, B]) => oklabToRgb(L, A, B));
   } else if (method === 'lab') {
@@ -629,14 +656,14 @@ function runAnalysis() {
     ({ centers, assign } = medianCut(lab, k));
     centers = centers.map(([L, a, b]) => labToRgb(L, a, b));
   } else if (method === 'lab-meanshift') {
-    const bw = 14 * Math.cbrt(10 / k);
+    const bw = bwMul * 14 * Math.cbrt(10 / k);
     ({ centers, assign, numModes } = meanShift(lab, k, bw));
     centers = centers.map(([L, a, b]) => labToRgb(L, a, b));
   } else if (method === 'rgb') {
     ({ centers, assign } = kmeans(rgb, k));
     centers = centers.map(c => c.map(v => Math.max(0, Math.min(255, Math.round(v)))));
   } else if (method === 'rgb-meanshift') {
-    const bw = 28 * Math.cbrt(10 / k);
+    const bw = bwMul * 28 * Math.cbrt(10 / k);
     ({ centers, assign, numModes } = meanShift(rgb, k, bw));
     centers = centers.map(c => c.map(v => Math.max(0, Math.min(255, Math.round(v)))));
   } else {
