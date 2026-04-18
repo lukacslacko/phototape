@@ -125,8 +125,8 @@
     <section class="panel">
       <h2>2. Palette</h2>
       <div class="row">
-        <label>Colors: <span id="kVal">12</span></label>
-        <input type="range" id="kInput" min="2" max="24" value="12">
+        <label>Colors: <span id="kVal">6</span></label>
+        <input type="range" id="kInput" min="2" max="24" value="6">
       </div>
       <div class="row">
         <label>Method:</label>
@@ -169,7 +169,26 @@
         <span class="hint" style="margin:0">0 = proportional to pixel counts · 100 = uniform bands</span>
       </div>
       <div class="tape-preview" id="tapePreview"></div>
-      <div class="hint">Click a <b>tape band</b> to drop that color (its pixels are discarded, remaining bands resize). Click a <b>swatch</b> to redistribute it (its pixels go to the nearest remaining color). Click again to restore.</div>
+      <div class="hint">Click a <b>tape band</b> to drop that color (its pixels are discarded, remaining bands resize). Click a <b>swatch</b> to redistribute it (its pixels go to the nearest remaining color). Click again to restore. <b>Drag bands</b> to reorder.</div>
+      <div class="row" style="margin-top:10px">
+        <label>Lightness: <span id="adjLVal">0</span></label>
+        <input type="range" id="adjL" min="-30" max="30" step="1" value="0">
+      </div>
+      <div class="row">
+        <label>Chroma: <span id="adjCVal">100</span>%</label>
+        <input type="range" id="adjC" min="0" max="200" step="5" value="100">
+      </div>
+      <div class="row">
+        <label>Hue: <span id="adjHVal">0</span>°</label>
+        <input type="range" id="adjH" min="-180" max="180" step="5" value="0">
+      </div>
+      <div class="row">
+        <label>Contrast: <span id="adjKVal">100</span>%</label>
+        <input type="range" id="adjK" min="50" max="200" step="5" value="100">
+      </div>
+      <div class="row">
+        <button id="adjReset" class="secondary">Reset palette adjustments</button>
+      </div>
       <div class="palette-grid" id="paletteGrid"></div>
     </section>
   </div>
@@ -458,12 +477,30 @@ const state = {
   image: null,          // HTMLImageElement
   imageData: null,      // full-res ImageData
   selection: null,      // {x0,y0,x1,y1} in image pixel coords
-  palette: [],          // [{rgb:[r,g,b], count, meanY, excluded}]
+  palette: [],          // [{rgb, displayRgb, count, meanY, excluded, dropped, idx, order?}]
   assign: null,         // per sample cluster index
   sampleYs: null,       // sample y coords
   remap: null,          // after exclusion: cluster -> effective cluster
   scale: 1,             // display scale factor
+  // Palette tuning applied in OKLab. lightness is additive on L,
+  // contrast scales L around 0.5, chroma scales (a,b) magnitude,
+  // hue rotates (a,b).
+  adjust: { lightness: 0, chroma: 1, hue: 0, contrast: 1 },
 };
+
+function applyAdjust(rgb) {
+  const a = state.adjust;
+  if (a.lightness === 0 && a.chroma === 1 && a.hue === 0 && a.contrast === 1) return rgb;
+  const [L0, A0, B0] = rgbToOklab(rgb[0], rgb[1], rgb[2]);
+  const L = 0.5 + (L0 - 0.5) * a.contrast + a.lightness;
+  const mag = Math.hypot(A0, B0) * a.chroma;
+  const ang = Math.atan2(B0, A0) + a.hue;
+  return oklabToRgb(L, mag * Math.cos(ang), mag * Math.sin(ang));
+}
+
+function recomputeDisplayRgb() {
+  for (const p of state.palette) p.displayRgb = applyAdjust(p.rgb);
+}
 
 //=========================================================
 // UI: source canvas + selection
@@ -599,6 +636,37 @@ bwInput.addEventListener('change', () => {
   }
 });
 
+// Palette adjustment sliders — live preview on drag.
+const adjL = document.getElementById('adjL');
+const adjC = document.getElementById('adjC');
+const adjH = document.getElementById('adjH');
+const adjK = document.getElementById('adjK');
+function readAdjust() {
+  state.adjust = {
+    lightness: parseInt(adjL.value, 10) / 100,
+    chroma:    parseInt(adjC.value, 10) / 100,
+    hue:       parseInt(adjH.value, 10) * Math.PI / 180,
+    contrast:  parseInt(adjK.value, 10) / 100,
+  };
+  document.getElementById('adjLVal').textContent = adjL.value;
+  document.getElementById('adjCVal').textContent = adjC.value;
+  document.getElementById('adjHVal').textContent = adjH.value;
+  document.getElementById('adjKVal').textContent = adjK.value;
+  if (state.palette.length) {
+    recomputeDisplayRgb();
+    refresh();
+  }
+}
+const adjDefaults = new Map([[adjL, 0], [adjC, 100], [adjH, 0], [adjK, 100]]);
+for (const [s, def] of adjDefaults) {
+  s.addEventListener('input', readAdjust);
+  s.addEventListener('dblclick', () => { s.value = def; readAdjust(); });
+}
+document.getElementById('adjReset').addEventListener('click', () => {
+  for (const [s, def] of adjDefaults) s.value = def;
+  readAdjust();
+});
+
 analyzeBtn.addEventListener('click', () => {
   setStatus('Analyzing…');
   // Defer so UI repaints
@@ -692,6 +760,7 @@ function runAnalysis() {
   state.assign = assign;
   state.sampleYs = ys;
   state.sampleRGB = rgb; // used to recompute preview / remap on exclusion
+  recomputeDisplayRgb();
 
   renderPalette();
   renderTape();
@@ -717,7 +786,7 @@ function renderPalette() {
     if (p.dropped) cls.push('dropped');
     else if (p.excluded) cls.push('excluded');
     div.className = cls.join(' ');
-    const [r,g,b] = p.rgb;
+    const [r,g,b] = p.displayRgb;
     const hex = '#' + [r,g,b].map(v => v.toString(16).padStart(2, '0')).join('');
     const tag = p.dropped ? ' dropped' : (p.excluded ? ' redist' : '');
     div.innerHTML = `
@@ -782,7 +851,13 @@ function tapeLayout() {
     effCount: counts.get(p.idx),
     effMeanY: counts.get(p.idx) > 0 ? ySums.get(p.idx) / counts.get(p.idx) : p.meanY,
   }));
-  eff.sort((a, b) => a.effMeanY - b.effMeanY);
+  // User-pinned orders come first; unordered entries fall back to meanY.
+  eff.sort((a, b) => {
+    const ao = a.order ?? Infinity;
+    const bo = b.order ?? Infinity;
+    if (ao !== bo) return ao - bo;
+    return a.effMeanY - b.effMeanY;
+  });
   const total = eff.reduce((s, p) => s + p.effCount, 0) || 1;
   const n = eff.length;
   const t = parseInt(document.getElementById('thickInput').value, 10) / 100;
@@ -792,6 +867,25 @@ function tapeLayout() {
   }));
 }
 
+let dragFromIdx = null;
+
+function reorderBands(fromIdx, toIdx, before) {
+  const layout = tapeLayout();
+  const order = layout.map(b => b.idx);
+  const fromPos = order.indexOf(fromIdx);
+  if (fromPos === -1) return;
+  order.splice(fromPos, 1);
+  let toPos = order.indexOf(toIdx);
+  if (toPos === -1) return;
+  if (!before) toPos += 1;
+  order.splice(toPos, 0, fromIdx);
+  order.forEach((idx, i) => {
+    const entry = state.palette.find(p => p.idx === idx);
+    if (entry) entry.order = i;
+  });
+  refresh();
+}
+
 function renderTape() {
   const preview = document.getElementById('tapePreview');
   preview.innerHTML = '';
@@ -799,12 +893,44 @@ function renderTape() {
   for (const b of layout) {
     const div = document.createElement('div');
     div.className = 'tape-band';
+    div.draggable = true;
     div.style.flex = b.frac.toString();
-    div.style.background = `rgb(${b.rgb[0]},${b.rgb[1]},${b.rgb[2]})`;
-    div.title = 'Click to drop this color from the tape';
+    const [r,g,bl] = b.displayRgb;
+    div.style.background = `rgb(${r},${g},${bl})`;
+    div.title = 'Drag to reorder · Click to drop this color from the tape';
     div.addEventListener('click', () => {
       const entry = state.palette.find(p => p.idx === b.idx);
       if (entry) { entry.dropped = true; refresh(); }
+    });
+    div.addEventListener('dragstart', e => {
+      dragFromIdx = b.idx;
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', String(b.idx));
+      div.style.opacity = '0.4';
+    });
+    div.addEventListener('dragend', () => {
+      div.style.opacity = '';
+      dragFromIdx = null;
+    });
+    div.addEventListener('dragover', e => {
+      if (dragFromIdx == null || dragFromIdx === b.idx) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      const rect = div.getBoundingClientRect();
+      const before = (e.clientX - rect.left) < rect.width / 2;
+      div.style.boxShadow = before
+        ? 'inset 3px 0 0 0 white'
+        : 'inset -3px 0 0 0 white';
+    });
+    div.addEventListener('dragleave', () => { div.style.boxShadow = ''; });
+    div.addEventListener('drop', e => {
+      e.preventDefault();
+      div.style.boxShadow = '';
+      if (dragFromIdx == null || dragFromIdx === b.idx) return;
+      const rect = div.getBoundingClientRect();
+      const before = (e.clientX - rect.left) < rect.width / 2;
+      reorderBands(dragFromIdx, b.idx, before);
+      dragFromIdx = null;
     });
     preview.appendChild(div);
   }
@@ -845,7 +971,7 @@ function renderQuantized() {
     return;
   }
   const activeLab = active.map(p => rgbToLab(...p.rgb));
-  const activeRGB = active.map(p => p.rgb);
+  const activeDisplayRGB = active.map(p => p.displayRgb);
 
   const d = imgd.data;
   for (let i = 0; i < d.length; i += 4) {
@@ -855,9 +981,9 @@ function renderQuantized() {
       const dd = dist2(lab, activeLab[j]);
       if (dd < bd) { bd = dd; best = j; }
     }
-    d[i]   = activeRGB[best][0];
-    d[i+1] = activeRGB[best][1];
-    d[i+2] = activeRGB[best][2];
+    d[i]   = activeDisplayRGB[best][0];
+    d[i+1] = activeDisplayRGB[best][1];
+    d[i+2] = activeDisplayRGB[best][2];
   }
   ctx.putImageData(imgd, 0, 0);
 }
@@ -922,7 +1048,8 @@ function buildPrintSheet() {
       const b = document.createElement('div');
       b.className = 'b';
       b.style.flex = band.frac.toString();
-      b.style.background = `rgb(${band.rgb[0]},${band.rgb[1]},${band.rgb[2]})`;
+      const [br, bg, bb] = band.displayRgb;
+      b.style.background = `rgb(${br},${bg},${bb})`;
       tape.appendChild(b);
     }
     row.appendChild(tape);
