@@ -133,8 +133,13 @@
         <select id="methodInput">
           <option value="lab">k-means in CIELAB (perceptual)</option>
           <option value="lab-median">Median cut in CIELAB</option>
+          <option value="lab-meanshift">Mean shift in CIELAB</option>
+          <option value="oklab">k-means in OKLab</option>
+          <option value="oklab-median">Median cut in OKLab</option>
+          <option value="oklab-meanshift">Mean shift in OKLab</option>
           <option value="rgb">k-means in RGB</option>
           <option value="median">Median cut in RGB</option>
+          <option value="rgb-meanshift">Mean shift in RGB</option>
         </select>
       </div>
       <div class="row">
@@ -190,6 +195,30 @@ function rgbToLab(r, g, b) {
   const fx = f(x/xn), fy = f(y/yn), fz = f(z/zn);
   return [116*fy - 16, 500*(fx-fy), 200*(fy-fz)];
 }
+// OKLab (Björn Ottosson, 2020). Expects sRGB 0-255; internally linearizes.
+function rgbToOklab(r, g, b) {
+  const lr = srgbToLinear(r), lg = srgbToLinear(g), lb = srgbToLinear(b);
+  const l = 0.4122214708*lr + 0.5363325363*lg + 0.0514459929*lb;
+  const m = 0.2119034982*lr + 0.6806995451*lg + 0.1073969566*lb;
+  const s = 0.0883024619*lr + 0.2817188376*lg + 0.6299787005*lb;
+  const l_ = Math.cbrt(l), m_ = Math.cbrt(m), s_ = Math.cbrt(s);
+  return [
+    0.2104542553*l_ + 0.7936177850*m_ - 0.0040720468*s_,
+    1.9779984951*l_ - 2.4285922050*m_ + 0.4505937099*s_,
+    0.0259040371*l_ + 0.7827717662*m_ - 0.8086757660*s_,
+  ];
+}
+function oklabToRgb(L, A, B) {
+  const l_ = L + 0.3963377774*A + 0.2158037573*B;
+  const m_ = L - 0.1055613458*A - 0.0638541728*B;
+  const s_ = L - 0.0894841775*A - 1.2914855480*B;
+  const l = l_*l_*l_, m = m_*m_*m_, s = s_*s_*s_;
+  const lr =  4.0767416621*l - 3.3077115913*m + 0.2309699292*s;
+  const lg = -1.2684380046*l + 2.6097574011*m - 0.3413193965*s;
+  const lb = -0.0041960863*l - 0.7034186147*m + 1.7076147010*s;
+  return [linearToSrgb(lr), linearToSrgb(lg), linearToSrgb(lb)];
+}
+
 function labToRgb(L, a, b) {
   const fy = (L + 16) / 116;
   const fx = fy + a/500;
@@ -291,6 +320,87 @@ function kmeans(points, k, maxIter = 25) {
     }
   }
   return { centers, assign };
+}
+
+// Mean shift — generic over any 3D point set. Flat kernel.
+// Seeds are a stride-subsampled copy of the input for tractability; after
+// convergence we merge close modes, keep the top k by weight, then assign
+// every original point to its nearest kept mode and refine each center to
+// the mean of its assigned points.
+function meanShift(points, k, bandwidth) {
+  const n = points.length;
+  if (n === 0) return { centers: [], assign: new Uint8Array(0), numModes: 0 };
+  const sampleCap = 2000;
+  const step = Math.max(1, Math.floor(n / sampleCap));
+  const seeds = [];
+  for (let i = 0; i < n; i += step) seeds.push(points[i].slice());
+  const m = seeds.length;
+  const origSeeds = seeds.map(p => p.slice());
+  const h2 = bandwidth * bandwidth;
+  const tol2 = (bandwidth * 0.02) ** 2;
+
+  for (let iter = 0; iter < 25; iter++) {
+    let maxShift2 = 0;
+    for (let i = 0; i < m; i++) {
+      const p = seeds[i];
+      let s0=0, s1=0, s2=0, w=0;
+      for (let j = 0; j < m; j++) {
+        const q = origSeeds[j];
+        const d0 = p[0]-q[0], d1 = p[1]-q[1], d2_ = p[2]-q[2];
+        const dd = d0*d0 + d1*d1 + d2_*d2_;
+        if (dd < h2) { s0 += q[0]; s1 += q[1]; s2 += q[2]; w++; }
+      }
+      if (w > 0) {
+        const nx = s0/w, ny = s1/w, nz = s2/w;
+        const dx = nx-p[0], dy = ny-p[1], dz = nz-p[2];
+        const sh = dx*dx + dy*dy + dz*dz;
+        if (sh > maxShift2) maxShift2 = sh;
+        p[0] = nx; p[1] = ny; p[2] = nz;
+      }
+    }
+    if (maxShift2 < tol2) break;
+  }
+
+  const modes = [];
+  const mergeTol2 = (bandwidth * 0.3) ** 2;
+  for (let i = 0; i < m; i++) {
+    let found = -1;
+    for (let j = 0; j < modes.length; j++) {
+      if (dist2(seeds[i], modes[j].center) < mergeTol2) { found = j; break; }
+    }
+    if (found === -1) {
+      modes.push({ center: seeds[i].slice(), weight: 1 });
+    } else {
+      const tot = modes[found].weight + 1;
+      for (let d = 0; d < 3; d++) {
+        modes[found].center[d] = (modes[found].center[d] * modes[found].weight + seeds[i][d]) / tot;
+      }
+      modes[found].weight = tot;
+    }
+  }
+  modes.sort((a, b) => b.weight - a.weight);
+  const kept = modes.slice(0, Math.min(k, modes.length));
+  const centers = kept.map(x => x.center);
+
+  const assign = new Uint8Array(n);
+  for (let i = 0; i < n; i++) {
+    const p = points[i];
+    let best = 0, bd = Infinity;
+    for (let j = 0; j < centers.length; j++) {
+      const d = dist2(p, centers[j]);
+      if (d < bd) { bd = d; best = j; }
+    }
+    assign[i] = best;
+  }
+  const sums = centers.map(() => [0, 0, 0, 0]);
+  for (let i = 0; i < n; i++) {
+    const s = sums[assign[i]], p = points[i];
+    s[0]+=p[0]; s[1]+=p[1]; s[2]+=p[2]; s[3]++;
+  }
+  const refined = centers.map((c, j) =>
+    sums[j][3] > 0 ? [sums[j][0]/sums[j][3], sums[j][1]/sums[j][3], sums[j][2]/sums[j][3]] : c
+  );
+  return { centers: refined, assign, numModes: modes.length };
 }
 
 // Median cut — generic over any 3D point set (works for RGB or Lab).
@@ -484,7 +594,10 @@ function runAnalysis() {
 
   const rgb = [];
   const lab = [];
+  const oklab = [];
   const ys = [];
+  const needLab = method === 'lab' || method === 'lab-median' || method === 'lab-meanshift';
+  const needOklab = method === 'oklab' || method === 'oklab-median' || method === 'oklab-meanshift';
   const { data, width } = imageData;
   for (let y = selection.y0; y < selection.y1; y += stride) {
     for (let x = selection.x0; x < selection.x1; x += stride) {
@@ -492,20 +605,39 @@ function runAnalysis() {
       const r = data[i], g = data[i+1], b = data[i+2], a = data[i+3];
       if (a < 128) continue;
       rgb.push([r, g, b]);
-      if (method === 'lab' || method === 'lab-median') lab.push(rgbToLab(r, g, b));
+      if (needLab) lab.push(rgbToLab(r, g, b));
+      if (needOklab) oklab.push(rgbToOklab(r, g, b));
       ys.push(y);
     }
   }
 
-  let centers, assign;
-  if (method === 'lab') {
+  let centers, assign, numModes;
+  if (method === 'oklab') {
+    ({ centers, assign } = kmeans(oklab, k));
+    centers = centers.map(([L, A, B]) => oklabToRgb(L, A, B));
+  } else if (method === 'oklab-median') {
+    ({ centers, assign } = medianCut(oklab, k));
+    centers = centers.map(([L, A, B]) => oklabToRgb(L, A, B));
+  } else if (method === 'oklab-meanshift') {
+    const bw = 0.08 * Math.cbrt(10 / k);
+    ({ centers, assign, numModes } = meanShift(oklab, k, bw));
+    centers = centers.map(([L, A, B]) => oklabToRgb(L, A, B));
+  } else if (method === 'lab') {
     ({ centers, assign } = kmeans(lab, k));
     centers = centers.map(([L, a, b]) => labToRgb(L, a, b));
   } else if (method === 'lab-median') {
     ({ centers, assign } = medianCut(lab, k));
     centers = centers.map(([L, a, b]) => labToRgb(L, a, b));
+  } else if (method === 'lab-meanshift') {
+    const bw = 14 * Math.cbrt(10 / k);
+    ({ centers, assign, numModes } = meanShift(lab, k, bw));
+    centers = centers.map(([L, a, b]) => labToRgb(L, a, b));
   } else if (method === 'rgb') {
     ({ centers, assign } = kmeans(rgb, k));
+    centers = centers.map(c => c.map(v => Math.max(0, Math.min(255, Math.round(v)))));
+  } else if (method === 'rgb-meanshift') {
+    const bw = 28 * Math.cbrt(10 / k);
+    ({ centers, assign, numModes } = meanShift(rgb, k, bw));
     centers = centers.map(c => c.map(v => Math.max(0, Math.min(255, Math.round(v)))));
   } else {
     ({ centers, assign } = medianCut(rgb, k));
@@ -538,7 +670,8 @@ function runAnalysis() {
   renderTape();
   renderQuantized();
   printBtn.disabled = false;
-  setStatus(`Found ${palette.length} colors from ${assign.length} samples (stride ${stride}).`);
+  const modesNote = numModes != null ? ` · mean shift found ${numModes} natural mode${numModes === 1 ? '' : 's'}` : '';
+  setStatus(`Found ${palette.length} colors from ${assign.length} samples (stride ${stride})${modesNote}.`);
 }
 
 function setStatus(s) { statusEl.textContent = s; }
